@@ -43,7 +43,7 @@ class ChatterboxVC:
         if device in ["cpu", "mps"]:
             map_location = torch.device('cpu')
         else:
-            map_location = None
+            map_location = torch.device(device)
             
         ref_dict = None
         if (builtin_voice := ckpt_dir / "conds.pt").exists():
