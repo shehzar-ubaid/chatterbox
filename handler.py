@@ -7,7 +7,7 @@ import base64
 print("1. Container started, starting Infinity Clone worker...")
 sys.stdout.flush()
 
-# FIX: Agar runpod import honay mein masla ho toh fauran bata de
+# RunPod Import Check
 try:
     import runpod
     print("2. RunPod library successfully imported.")
@@ -15,14 +15,18 @@ except Exception as e:
     print(f"CRITICAL ERROR: RunPod import fail ho gaya: {e}")
     sys.exit(1)
 
+# Source folder path add kiya
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
+# Asli Model Load Karein
 model = None
 try:
     print("3. Model load ho raha hai...")
-    # Yahan apne real model ka code uncomment karein jab errors khatam ho jayen
-    # from chatterbox import Chatterbox 
-    # model = Chatterbox.load_model("./models")
+    
+    # Yahan humne asli model ko on kar diya hay
+    from chatterbox import Chatterbox 
+    model = Chatterbox.load_model("./models")
+    
     print("4. Model VRAM mein load ho gaya!")
 except Exception as e:
     print("ERROR: Model load hotay waqt masla aya:")
@@ -39,12 +43,11 @@ def process_audio(job):
         if model is None:
              return {"error": "API failed. Model theek say load nahi hua."}
         
-        # Real generation code
-        # audio_path = model.synthesize(text=text, voice=voice_id)
-        # with open(audio_path, "rb") as audio_file:
-        #     audio_base64 = base64.b64encode(audio_file.read()).decode('utf-8')
+        # Real generation code on kar diya
+        audio_path = model.synthesize(text=text, voice=voice_id)
         
-        audio_base64 = "base64_audio_string_here" 
+        with open(audio_path, "rb") as audio_file:
+            audio_base64 = base64.b64encode(audio_file.read()).decode('utf-8')
 
         return {
             "status": "success",
