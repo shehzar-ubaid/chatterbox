@@ -5,7 +5,8 @@ import base64
 import tempfile
 import scipy.io.wavfile as wavfile
 import numpy as np
-import inspect # FIX: Model kay asaal parameters check karne kay liye
+import inspect
+import re # Naya import: Lambay text ko sentences mein tornay kay liye
 
 print("1. Container started, starting Infinity Clone worker...")
 sys.stdout.flush()
@@ -32,11 +33,9 @@ try:
     print("TTS Model loading...")
     tts_model = ChatterboxTTS.from_pretrained(device)
     
-    print("V2V Model loading...")
-    try:
-        vc_model = ChatterboxVC.from_pretrained(device)
-    except Exception as vc_e:
-        print(f"Note: V2V model load warning (normal hay): {vc_e}")
+    print("V2V Model loading (using TTS engine)...")
+    # FIX 100% V2V: Alag se download karne kay bajaye TTS ka engine use kiya hay
+    vc_model = ChatterboxVC(s3gen=tts_model.s3gen, device=device)
     
     print("4. Models VRAM mein successfully load ho gaye!")
 except Exception as e:
@@ -54,6 +53,12 @@ def decode_base64_to_temp(b64_string, suffix=".wav"):
     temp_file.close()
     return temp_file.name
 
+# FIX LONG SPEECH: Text ko sentences mein tornay ka function
+def split_into_sentences(text):
+    # Full stops, question marks aur exclamation marks par text ko split karega
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    return [s.strip() for s in sentences if len(s.strip()) > 0]
+
 def process_audio(job):
     job_input = job.get('input', {})
     action = job_input.get('action', 'tts')
@@ -61,7 +66,7 @@ def process_audio(job):
     try:
         print(f"Processing job ID: {job.get('id')} - Action: {action}")
         
-        audio_tensor = None
+        audio_numpy_final = None
         sr = 24000 
         
         # =========== 1. TTS aur VOICE CLONING ===========
@@ -69,37 +74,44 @@ def process_audio(job):
             if tts_model is None:
                  return {"error": "API failed. TTS Model theek say load nahi hua."}
             
-            text = job_input.get('text', 'Hello from Infinity Clone')
+            full_text = job_input.get('text', 'Hello from Infinity Clone')
             speaker_wav_b64 = job_input.get('speaker_wav')
             
             kwargs = {}
             temp_speaker_path = None
-            
-            # Model kay asaal accepted parameters yahan se milenge
             valid_keys = inspect.signature(tts_model.generate).parameters.keys()
             
             if speaker_wav_b64:
                 temp_speaker_path = decode_base64_to_temp(speaker_wav_b64)
+                if 'voice' in valid_keys: kwargs['voice'] = temp_speaker_path
+                elif 'audio_prompt_path' in valid_keys: kwargs['audio_prompt_path'] = temp_speaker_path
+                elif 'speaker' in valid_keys: kwargs['speaker'] = temp_speaker_path
+            
+            if 'temperature' in job_input and 'temperature' in valid_keys: kwargs['temperature'] = float(job_input['temperature'])
+            if 'speed' in job_input and 'speed' in valid_keys: kwargs['speed'] = float(job_input['speed'])
+            if 'repetition_penalty' in job_input and 'repetition_penalty' in valid_keys: kwargs['repetition_penalty'] = float(job_input['repetition_penalty'])
+            if 'top_p' in job_input and 'top_p' in valid_keys: kwargs['top_p'] = float(job_input['top_p'])
+            
+            # LAMBI SPEECH KA HAL: Text ko tukron mein process karna
+            sentences = split_into_sentences(full_text)
+            audio_chunks = []
+            
+            print(f"Text split into {len(sentences)} sentences for processing.")
+            
+            for i, sentence in enumerate(sentences):
+                print(f"Generating sentence {i+1}/{len(sentences)}...")
+                audio_tensor = tts_model.generate(text=sentence, **kwargs)
                 
-                # Jo parameter model support karta hay, wahi pass karega
-                if 'voice' in valid_keys:
-                    kwargs['voice'] = temp_speaker_path
-                elif 'audio_prompt_path' in valid_keys:
-                    kwargs['audio_prompt_path'] = temp_speaker_path
-                elif 'speaker' in valid_keys:
-                    kwargs['speaker'] = temp_speaker_path
+                if isinstance(audio_tensor, tuple):
+                    audio_tensor = audio_tensor[0]
+                chunk_numpy = audio_tensor.squeeze().cpu().numpy()
+                audio_chunks.append(chunk_numpy)
             
-            # Frontend se anay wali baqi settings ko smartly handle karein
-            if 'temperature' in job_input and 'temperature' in valid_keys:
-                kwargs['temperature'] = float(job_input['temperature'])
-            if 'speed' in job_input and 'speed' in valid_keys:
-                kwargs['speed'] = float(job_input['speed'])
-            if 'repetition_penalty' in job_input and 'repetition_penalty' in valid_keys:
-                kwargs['repetition_penalty'] = float(job_input['repetition_penalty'])
-            if 'top_p' in job_input and 'top_p' in valid_keys:
-                kwargs['top_p'] = float(job_input['top_p'])
+            if not audio_chunks:
+                 return {"error": "Koi text process nahi ho saka."}
             
-            audio_tensor = tts_model.generate(text=text, **kwargs)
+            # Saari generated awazon ko jor (concatenate) kar kay ek lambi file banayein
+            audio_numpy_final = np.concatenate(audio_chunks)
             sr = tts_model.sr if hasattr(tts_model, 'sr') else 24000
             
             if temp_speaker_path:
@@ -119,16 +131,18 @@ def process_audio(job):
             temp_source = decode_base64_to_temp(source_audio_b64)
             temp_target = decode_base64_to_temp(target_audio_b64)
             
-            # V2V kay liye bhi smart parameter checking
             vc_valid_keys = inspect.signature(vc_model.generate).parameters.keys()
             vc_kwargs = {}
             
-            if 'target_voice_path' in vc_valid_keys:
-                vc_kwargs['target_voice_path'] = temp_target
-            elif 'voice' in vc_valid_keys:
-                vc_kwargs['voice'] = temp_target
+            if 'target_voice_path' in vc_valid_keys: vc_kwargs['target_voice_path'] = temp_target
+            elif 'voice' in vc_valid_keys: vc_kwargs['voice'] = temp_target
                 
+            print("Generating V2V audio...")
             audio_tensor = vc_model.generate(audio=temp_source, **vc_kwargs)
+            
+            if isinstance(audio_tensor, tuple):
+                audio_tensor = audio_tensor[0]
+            audio_numpy_final = audio_tensor.squeeze().cpu().numpy()
             sr = vc_model.sr if hasattr(vc_model, 'sr') else 24000
             
             os.remove(temp_source)
@@ -137,24 +151,20 @@ def process_audio(job):
         else:
             return {"error": f"Unknown action received: {action}"}
         
-        # =========== RESULT ===========
-        if audio_tensor is not None:
-            if isinstance(audio_tensor, tuple):
-                audio_tensor = audio_tensor[0]
-                
-            audio_numpy = audio_tensor.squeeze().cpu().numpy()
-            
+        # =========== RESULT KO WAPIS BHEJNA ===========
+        if audio_numpy_final is not None:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_wav:
                 temp_wav_path = temp_wav.name
-                wavfile.write(temp_wav_path, sr, audio_numpy)
+                wavfile.write(temp_wav_path, sr, audio_numpy_final)
             
             with open(temp_wav_path, "rb") as audio_file:
                 audio_base64 = base64.b64encode(audio_file.read()).decode('utf-8')
                 
             os.remove(temp_wav_path)
+            print("Job successfully completed!")
             return {"status": "success", "audio_base64": audio_base64}
         else:
-            return {"error": "Generation failed. Audio tensor is None."}
+            return {"error": "Generation failed. Audio is None."}
             
     except Exception as e:
         return {"error": str(e), "traceback": traceback.format_exc()}
