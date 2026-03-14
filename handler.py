@@ -5,6 +5,7 @@ import base64
 import tempfile
 import scipy.io.wavfile as wavfile
 import numpy as np
+import inspect # FIX: Model kay asaal parameters check karne kay liye
 
 print("1. Container started, starting Infinity Clone worker...")
 sys.stdout.flush()
@@ -19,37 +20,32 @@ except Exception as e:
 
 sys.path.append(os.path.join(os.path.dirname(__file__), 'src'))
 
-# Dono models (TTS aur V2V) ko globally define kar rahay hain
 tts_model = None
 vc_model = None
 
 try:
-    print("3. Models load ho rahay hain (Pehli dafa heavy files internet se download hongi)...")
+    print("3. Models load ho rahay hain...")
     from chatterbox import ChatterboxTTS, ChatterboxVC 
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # 1. TTS aur Voice Cloning ka model load karein
     print("TTS Model loading...")
     tts_model = ChatterboxTTS.from_pretrained(device)
     
-    # 2. Voice to Voice (V2V) ka model load karein
     print("V2V Model loading...")
     try:
         vc_model = ChatterboxVC.from_pretrained(device)
     except Exception as vc_e:
-        print(f"Note: V2V model load hotay waqt warning aayi (yeh normal ho sakti hay): {vc_e}")
+        print(f"Note: V2V model load warning (normal hay): {vc_e}")
     
     print("4. Models VRAM mein successfully load ho gaye!")
 except Exception as e:
     print("ERROR: Model load hotay waqt masla aya:")
     print(traceback.format_exc())
 
-# Base64 audio ko temporary .wav file mein save karne ka function
 def decode_base64_to_temp(b64_string, suffix=".wav"):
     if not b64_string:
         return None
-    # Agar frontend se header (data:audio/wav;base64,) sath aaye toh usay hata dein
     if "," in b64_string:
         b64_string = b64_string.split(",")[1]
         
@@ -60,15 +56,13 @@ def decode_base64_to_temp(b64_string, suffix=".wav"):
 
 def process_audio(job):
     job_input = job.get('input', {})
-    
-    # Frontend se aane wali action check karein (tts, clone, ya v2v)
     action = job_input.get('action', 'tts')
     
     try:
         print(f"Processing job ID: {job.get('id')} - Action: {action}")
         
         audio_tensor = None
-        sr = 24000 # Default sample rate
+        sr = 24000 
         
         # =========== 1. TTS aur VOICE CLONING ===========
         if action in ['tts', 'clone']:
@@ -81,22 +75,33 @@ def process_audio(job):
             kwargs = {}
             temp_speaker_path = None
             
-            # Agar frontend ne sample voice bheji hay (Cloning kay liye)
+            # Model kay asaal accepted parameters yahan se milenge
+            valid_keys = inspect.signature(tts_model.generate).parameters.keys()
+            
             if speaker_wav_b64:
                 temp_speaker_path = decode_base64_to_temp(speaker_wav_b64)
-                kwargs['audio_prompt_path'] = temp_speaker_path
+                
+                # Jo parameter model support karta hay, wahi pass karega
+                if 'voice' in valid_keys:
+                    kwargs['voice'] = temp_speaker_path
+                elif 'audio_prompt_path' in valid_keys:
+                    kwargs['audio_prompt_path'] = temp_speaker_path
+                elif 'speaker' in valid_keys:
+                    kwargs['speaker'] = temp_speaker_path
             
-            # Advance settings jo frontend se ayengi
-            if 'temperature' in job_input: kwargs['temperature'] = float(job_input['temperature'])
-            if 'speed' in job_input: kwargs['speed'] = float(job_input['speed'])
-            if 'repetition_penalty' in job_input: kwargs['repetition_penalty'] = float(job_input['repetition_penalty'])
-            if 'top_p' in job_input: kwargs['top_p'] = float(job_input['top_p'])
+            # Frontend se anay wali baqi settings ko smartly handle karein
+            if 'temperature' in job_input and 'temperature' in valid_keys:
+                kwargs['temperature'] = float(job_input['temperature'])
+            if 'speed' in job_input and 'speed' in valid_keys:
+                kwargs['speed'] = float(job_input['speed'])
+            if 'repetition_penalty' in job_input and 'repetition_penalty' in valid_keys:
+                kwargs['repetition_penalty'] = float(job_input['repetition_penalty'])
+            if 'top_p' in job_input and 'top_p' in valid_keys:
+                kwargs['top_p'] = float(job_input['top_p'])
             
-            # Audio Generate karein
             audio_tensor = tts_model.generate(text=text, **kwargs)
             sr = tts_model.sr if hasattr(tts_model, 'sr') else 24000
             
-            # Server ki memory bachane kay liye temp file delete karein
             if temp_speaker_path:
                 os.remove(temp_speaker_path)
                 
@@ -111,24 +116,29 @@ def process_audio(job):
             if not source_audio_b64 or not target_audio_b64:
                 return {"error": "V2V kay liye 'source_audio' aur 'target_audio' dono zaroori hain."}
             
-            # Dono files ko temp files mein save karein
             temp_source = decode_base64_to_temp(source_audio_b64)
             temp_target = decode_base64_to_temp(target_audio_b64)
             
-            # V2V Generate karein
-            audio_tensor = vc_model.generate(audio=temp_source, target_voice_path=temp_target)
+            # V2V kay liye bhi smart parameter checking
+            vc_valid_keys = inspect.signature(vc_model.generate).parameters.keys()
+            vc_kwargs = {}
+            
+            if 'target_voice_path' in vc_valid_keys:
+                vc_kwargs['target_voice_path'] = temp_target
+            elif 'voice' in vc_valid_keys:
+                vc_kwargs['voice'] = temp_target
+                
+            audio_tensor = vc_model.generate(audio=temp_source, **vc_kwargs)
             sr = vc_model.sr if hasattr(vc_model, 'sr') else 24000
             
-            # Temp files delete karein
             os.remove(temp_source)
             os.remove(temp_target)
             
         else:
             return {"error": f"Unknown action received: {action}"}
         
-        # =========== RESULT KO WAPIS BASE64 MEIN BADALNA ===========
+        # =========== RESULT ===========
         if audio_tensor is not None:
-            # Agar result tuple ho toh pehla hissa nikal lein
             if isinstance(audio_tensor, tuple):
                 audio_tensor = audio_tensor[0]
                 
