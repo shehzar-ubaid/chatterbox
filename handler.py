@@ -6,7 +6,7 @@ import tempfile
 import scipy.io.wavfile as wavfile
 import numpy as np
 import inspect
-import re # Naya import: Lambay text ko sentences mein tornay kay liye
+import re
 
 print("1. Container started, starting Infinity Clone worker...")
 sys.stdout.flush()
@@ -34,7 +34,6 @@ try:
     tts_model = ChatterboxTTS.from_pretrained(device)
     
     print("V2V Model loading (using TTS engine)...")
-    # FIX 100% V2V: Alag se download karne kay bajaye TTS ka engine use kiya hay
     vc_model = ChatterboxVC(s3gen=tts_model.s3gen, device=device)
     
     print("4. Models VRAM mein successfully load ho gaye!")
@@ -53,9 +52,7 @@ def decode_base64_to_temp(b64_string, suffix=".wav"):
     temp_file.close()
     return temp_file.name
 
-# FIX LONG SPEECH: Text ko sentences mein tornay ka function
 def split_into_sentences(text):
-    # Full stops, question marks aur exclamation marks par text ko split karega
     sentences = re.split(r'(?<=[.!?])\s+', text)
     return [s.strip() for s in sentences if len(s.strip()) > 0]
 
@@ -92,25 +89,25 @@ def process_audio(job):
             if 'repetition_penalty' in job_input and 'repetition_penalty' in valid_keys: kwargs['repetition_penalty'] = float(job_input['repetition_penalty'])
             if 'top_p' in job_input and 'top_p' in valid_keys: kwargs['top_p'] = float(job_input['top_p'])
             
-            # LAMBI SPEECH KA HAL: Text ko tukron mein process karna
             sentences = split_into_sentences(full_text)
             audio_chunks = []
             
-            print(f"Text split into {len(sentences)} sentences for processing.")
-            
             for i, sentence in enumerate(sentences):
-                print(f"Generating sentence {i+1}/{len(sentences)}...")
                 audio_tensor = tts_model.generate(text=sentence, **kwargs)
-                
                 if isinstance(audio_tensor, tuple):
                     audio_tensor = audio_tensor[0]
-                chunk_numpy = audio_tensor.squeeze().cpu().numpy()
+                
+                # BULLETPROOF TENSOR/NUMPY CHECK
+                if hasattr(audio_tensor, 'cpu'):
+                    chunk_numpy = audio_tensor.squeeze().cpu().numpy()
+                else:
+                    chunk_numpy = np.squeeze(audio_tensor)
+                    
                 audio_chunks.append(chunk_numpy)
             
             if not audio_chunks:
                  return {"error": "Koi text process nahi ho saka."}
             
-            # Saari generated awazon ko jor (concatenate) kar kay ek lambi file banayein
             audio_numpy_final = np.concatenate(audio_chunks)
             sr = tts_model.sr if hasattr(tts_model, 'sr') else 24000
             
@@ -142,7 +139,13 @@ def process_audio(job):
             
             if isinstance(audio_tensor, tuple):
                 audio_tensor = audio_tensor[0]
-            audio_numpy_final = audio_tensor.squeeze().cpu().numpy()
+                
+            # BULLETPROOF TENSOR/NUMPY CHECK FOR V2V
+            if hasattr(audio_tensor, 'cpu'):
+                audio_numpy_final = audio_tensor.squeeze().cpu().numpy()
+            else:
+                audio_numpy_final = np.squeeze(audio_tensor)
+                
             sr = vc_model.sr if hasattr(vc_model, 'sr') else 24000
             
             os.remove(temp_source)
