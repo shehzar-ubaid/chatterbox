@@ -20,4 +20,4 @@ RUN python3 -m pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # FIX: Explicitly 'python3' se run karein
-CMD ["python3", "-u", "handler.py"]
+CMD ["python3", "-u", "handler.py"]               
