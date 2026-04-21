@@ -8,7 +8,7 @@ WORKDIR /app
 
 # System dependencies
 RUN apt-get update && apt-get install -y ffmpeg
-
+      
 COPY requirements.txt .
 
 # FIX 100%: 'python3 -m pip' use kiya hay taake exactly usi python mein install ho jo baad mein chalega
